@@ -6,62 +6,46 @@ import urllib.parse
 from bs4 import BeautifulSoup
 import email.utils
 from datetime import datetime, timezone, timedelta
-import time
 import re
 
 # --- 1. 페이지 기본 설정 ---
 st.set_page_config(page_title="GPA 뉴스 센싱 대시보드", page_icon="📰", layout="wide")
 st.title("📰 글로벌 대외협력(GPA) 뉴스 센싱 대시보드")
-st.markdown("주요 글로벌 매체의 48시간 내 동향을 실시간으로 수집합니다.")
 
-# --- 2. 사이드바 (키워드 및 언론사 관리 UI) ---
+# --- 2. 사이드바 (키워드/언론사 영구 세팅) ---
 with st.sidebar:
     st.header("⚙️ 대시보드 설정")
-    st.markdown("쉼표(,)로 구분해 자유롭게 입력하세요.")
+    st.markdown("<p style='font-size: 14px; color: #ff4b4b;'>🚨 <b>영구 저장 안내:</b><br>다음에 접속할 때도 유지하려면 웹화면이 아니라 <b>깃허브 app.py 코드의 21, 22번째 줄을 직접 수정</b>해야 합니다!</p>", unsafe_allow_html=True)
 
-    # 🚨 1번 문제 해결: Streamlit 'key' 속성을 이용해 값 영구 고정
+    # 👇 [수정 위치] 평생 남길 키워드나 도메인은 무조건 아래 큰따옴표 안에 추가하세요!
+    DEFAULT_KW = "Trump AI, AI Chips, Anthropic, OpenAI, Bondi, David Sacks, AI Order, Glasswing, OpenAI TAC, Trusted Access for Cyber, AI Exports Program, AI Exports, AI Export, Pax Silica"
+    DEFAULT_DOMAINS = "wsj.com, ft.com, bloomberg.com, reuters.com, politico.com, washingtonpost.com, axios.com"
+
     if "kw_input" not in st.session_state:
-        st.session_state.kw_input = "Trump AI, AI Chips, Anthropic, OpenAI, Bondi, David Sacks, AI Order, Glasswing, OpenAI TAC, Trusted Access for Cyber"
+        st.session_state.kw_input = DEFAULT_KW
     if "domain_input" not in st.session_state:
-        st.session_state.domain_input = "wsj.com, ft.com, bloomberg.com, reuters.com, politico.com, washingtonpost.com"
+        st.session_state.domain_input = DEFAULT_DOMAINS
 
-    # key를 지정해두면 새로고침을 해도 절대 날아가지 않습니다.
-    st.text_area("🔍 검색 키워드 목록", key="kw_input", height=150)
-    st.text_area("🌐 탐색할 언론사 사이트 (도메인)", key="domain_input", height=100)
+    user_kw = st.text_area("🔍 검색 키워드 목록 (오늘 하루만 적용)", key="kw_input", height=150)
+    user_domains = st.text_area("🌐 탐색할 언론사 사이트 (오늘 하루만 적용)", key="domain_input", height=100)
 
-    if st.button("💾 적용 및 새로고침", use_container_width=True):
+    if st.button("💾 임시 적용", use_container_width=True):
         st.cache_data.clear() 
         st.rerun()
 
-# 세션에 저장된 값을 바로 불러와서 사용
 KEYWORDS = [kw.strip() for kw in st.session_state.kw_input.split(",") if kw.strip()]
 TARGET_DOMAINS = [domain.strip() for domain in st.session_state.domain_input.split(",") if domain.strip()]
 
-# --- 3. AI 설정 (안정적인 모델 탐색) ---
+# --- 3. AI 설정 (최신 모델 고정 및 필터 해제) ---
 api_key = os.environ.get("GEMINI_API_KEY")
-model = None
 
-if api_key:
-    genai.configure(api_key=api_key)
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-
-        if available_models:
-            target_model = next((m for m in available_models if '1.5-flash-8b' in m), None)
-            if not target_model:
-                target_model = next((m for m in available_models if '1.5-flash' in m), None)
-            if not target_model:
-                target_model = next((m for m in available_models if 'flash' in m and '2.' not in m), None)
-            if not target_model:
-                target_model = next((m for m in available_models if 'pro' in m and '2.' not in m), available_models[0])
-
-            model = genai.GenerativeModel(target_model)
-        else:
-            st.sidebar.error("사용 가능한 AI 모델을 찾을 수 없습니다.")
-    except Exception as e:
-        st.sidebar.error(f"모델 탐색 에러: {e}")
-else:
+if not api_key:
     st.error("⚠️ 좌측 [Secrets] 메뉴에서 `GEMINI_API_KEY`를 먼저 설정해주세요!")
+else:
+    genai.configure(api_key=api_key)
+
+# 복잡한 모델 찾기 로직 제거, 제일 빠르고 안정적인 모델로 강제 고정
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # --- 4. 뉴스 수집 엔진 ---
 @st.cache_data(ttl=1800)
@@ -82,21 +66,15 @@ def fetch_news(current_keywords, current_domains):
         for entry in feed.entries:
             title = entry.title if hasattr(entry, 'title') else ""
             desc = entry.description if hasattr(entry, 'description') else ""
-
             text_to_search = (title + " " + desc).lower()
             matched_tags = []
 
             for kw in current_keywords:
                 words = kw.lower().split()
-                is_all_words_matched = all(re.search(rf'\b{re.escape(word)}\b', text_to_search) for word in words)
-
-                if is_all_words_matched:
+                if all(re.search(rf'\b{re.escape(word)}\b', text_to_search) for word in words):
                     matched_tags.append(f"#{kw.replace(' ', '_')}")
 
-            if not matched_tags:
-                continue
-
-            if not any(e.link == entry.link for e in valid_entries):
+            if matched_tags and not any(e.link == entry.link for e in valid_entries):
                 entry.matched_tags = list(set(matched_tags)) 
                 valid_entries.append(entry)
 
@@ -109,10 +87,9 @@ def fetch_news(current_keywords, current_domains):
     valid_entries.sort(key=get_timestamp, reverse=True)
     return valid_entries
 
-# 🚨 2번 문제 해결: AI 에러 방어(좀비 모드) 추가
+# AI 에러 방어 및 검열 해제 로직
 def ai_news_summarizer(title, description):
     safe_description = description[:1500] 
-    
     prompt = f"""
     다음은 미국 테크/정책 뉴스의 제목과 본문 일부입니다. 
     대외협력(GPA) 부서에서 글로벌 동향 파악을 위해 참고할 수 있도록 핵심만 3줄로 한국어로 요약해 주세요.
@@ -121,16 +98,21 @@ def ai_news_summarizer(title, description):
     내용: {safe_description}
     """
     
-    # 서버 에러 발생 시 최대 3번까지 알아서 재시도
-    for attempt in range(3):
-        try:
-            response = model.generate_content(prompt)
-            if response.text:
-                return response.text
-        except Exception:
-            if attempt == 2: # 3번 다 실패했을 때만 에러 메시지 표출
-                return "⚠️ 구글 AI 서버가 응답하지 않습니다. (일시적 트래픽 과부하) 잠시 후 다시 시도하거나 기사 원문을 확인해 주세요."
-            time.sleep(2) # 에러 나면 2초 쉬고 다시 시도
+    # 트럼프 등 정치/민감 키워드로 인한 AI 자체 검열(Safety Block) 완전 차단
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+    ]
+
+    try:
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        if response.text:
+            return response.text
+    except Exception as e:
+        # 뭉뚱그리지 않고 실제 에러 메시지를 화면에 그대로 출력
+        return f"⚠️ 구글 AI 요약 실패 (에러 상세 원인): {e}"
 
 # --- 5. 화면 출력 ---
 st.subheader("📡 글로벌 매체 실시간 센싱 결과 (최근 48시간)")
@@ -155,8 +137,7 @@ else:
             try:
                 dt = email.utils.parsedate_to_datetime(published)
                 kst_tz = timezone(timedelta(hours=9))
-                dt_kst = dt.astimezone(kst_tz)
-                formatted_date = dt_kst.strftime("%m월 %d일 %H:%M (KST)")
+                formatted_date = dt.astimezone(kst_tz).strftime("%m월 %d일 %H:%M (KST)")
             except:
                 formatted_date = published 
 
@@ -178,9 +159,8 @@ else:
                     if st.button("🤖 AI 3줄 요약 보기", key=f"btn_{link}"):
                         soup = BeautifulSoup(description, "html.parser")
                         clean_text = soup.get_text()
-                        with st.spinner("요약 중입니다... (1~2초)"):
-                            summary = ai_news_summarizer(title, clean_text)
-                            st.session_state[link] = summary 
+                        with st.spinner("요약 중입니다..."):
+                            st.session_state[link] = ai_news_summarizer(title, clean_text)
                             st.rerun() 
 
             if st.session_state[link]:

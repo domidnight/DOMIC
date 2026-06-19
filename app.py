@@ -36,47 +36,63 @@ with st.sidebar:
 KEYWORDS = [kw.strip() for kw in st.session_state.kw_input.split(",") if kw.strip()]
 TARGET_DOMAINS = [domain.strip() for domain in st.session_state.domain_input.split(",") if domain.strip()]
 
-# --- 3. AI 설정 (최신 모델 고정 및 필터 해제) ---
+# --- 3. AI 설정 (자동 탐색 복구 + 필터 해제) ---
 api_key = os.environ.get("GEMINI_API_KEY")
+model = None
 
 if not api_key:
     st.error("⚠️ 좌측 [Secrets] 메뉴에서 `GEMINI_API_KEY`를 먼저 설정해주세요!")
 else:
     genai.configure(api_key=api_key)
+    try:
+        # 내 버전에 맞는 정확한 모델 풀네임을 알아서 찾아오는 로직 부활
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        target_model_name = next((m for m in available_models if '1.5-flash' in m), None)
+        if not target_model_name:
+            target_model_name = next((m for m in available_models if 'pro' in m), available_models[0])
+        model = genai.GenerativeModel(target_model_name)
+    except Exception as e:
+        st.sidebar.error(f"모델 탐색 에러: {e}")
 
-# 복잡한 모델 찾기 로직 제거, 제일 빠르고 안정적인 모델로 강제 고정
-model = genai.GenerativeModel("gemini-1.5-flash")
-
-# --- 4. 뉴스 수집 엔진 ---
+# --- 4. 뉴스 수집 엔진 (Chunking 기술 적용) ---
 @st.cache_data(ttl=1800)
 def fetch_news(current_keywords, current_domains):
     if not current_keywords or not current_domains:
         return []
 
-    query_parts = [f'"{kw}"' for kw in current_keywords]
-    kw_query = " OR ".join(query_parts)
     valid_entries = []
+    
+    # 🚨 구글 검색어 한도 초과 방지: 키워드를 4개씩 한 묶음으로 쪼개기
+    chunk_size = 4
+    kw_chunks = [current_keywords[i:i + chunk_size] for i in range(0, len(current_keywords), chunk_size)]
 
     for domain in current_domains:
-        full_query = f"({kw_query}) site:{domain} when:48h"
-        encoded_query = urllib.parse.quote(full_query)
-        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(rss_url)
+        for chunk in kw_chunks:
+            query_parts = [f'"{kw}"' for kw in chunk]
+            kw_query = " OR ".join(query_parts)
+            
+            full_query = f"({kw_query}) site:{domain} when:48h"
+            encoded_query = urllib.parse.quote(full_query)
+            rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+            
+            feed = feedparser.parse(rss_url)
 
-        for entry in feed.entries:
-            title = entry.title if hasattr(entry, 'title') else ""
-            desc = entry.description if hasattr(entry, 'description') else ""
-            text_to_search = (title + " " + desc).lower()
-            matched_tags = []
+            for entry in feed.entries:
+                title = entry.title if hasattr(entry, 'title') else ""
+                desc = entry.description if hasattr(entry, 'description') else ""
+                text_to_search = (title + " " + desc).lower()
+                matched_tags = []
 
-            for kw in current_keywords:
-                words = kw.lower().split()
-                if all(re.search(rf'\b{re.escape(word)}\b', text_to_search) for word in words):
-                    matched_tags.append(f"#{kw.replace(' ', '_')}")
+                # 가져온 기사 안에 전체 키워드 중 일치하는 게 있는지 꼼꼼히 재검사
+                for kw in current_keywords:
+                    words = kw.lower().split()
+                    if all(re.search(rf'\b{re.escape(word)}\b', text_to_search) for word in words):
+                        matched_tags.append(f"#{kw.replace(' ', '_')}")
 
-            if matched_tags and not any(e.link == entry.link for e in valid_entries):
-                entry.matched_tags = list(set(matched_tags)) 
-                valid_entries.append(entry)
+                # 중복 수집 방지
+                if matched_tags and not any(e.link == entry.link for e in valid_entries):
+                    entry.matched_tags = list(set(matched_tags)) 
+                    valid_entries.append(entry)
 
     def get_timestamp(e):
         try:
@@ -98,7 +114,6 @@ def ai_news_summarizer(title, description):
     내용: {safe_description}
     """
     
-    # 트럼프 등 정치/민감 키워드로 인한 AI 자체 검열(Safety Block) 완전 차단
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -111,7 +126,6 @@ def ai_news_summarizer(title, description):
         if response.text:
             return response.text
     except Exception as e:
-        # 뭉뚱그리지 않고 실제 에러 메시지를 화면에 그대로 출력
         return f"⚠️ 구글 AI 요약 실패 (에러 상세 원인): {e}"
 
 # --- 5. 화면 출력 ---

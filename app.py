@@ -36,7 +36,7 @@ with st.sidebar:
 KEYWORDS = [kw.strip() for kw in st.session_state.kw_input.split(",") if kw.strip()]
 TARGET_DOMAINS = [domain.strip() for domain in st.session_state.domain_input.split(",") if domain.strip()]
 
-# --- 3. AI 설정 (빠르고 제한이 넉넉한 모델로 강제 고정) ---
+# --- 3. AI 설정 (가벼운 Flash 모델 자동 탐색 & Pro 모델 절대 차단) ---
 api_key = os.environ.get("GEMINI_API_KEY")
 model = None
 
@@ -44,8 +44,20 @@ if not api_key:
     st.error("⚠️ 좌측 [Secrets] 메뉴에서 `GEMINI_API_KEY`를 먼저 설정해주세요!")
 else:
     genai.configure(api_key=api_key)
-    # 복잡한 탐색 로직을 모두 지우고, 무조건 flash 모델만 쓰도록 고정!
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    try:
+        # 내 계정에서 현재 쓸 수 있는 모델 목록 싹 다 가져오기
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 1순위: 이름에 'flash'가 들어간 모델을 최우선으로 찾음 (404 에러 방지)
+        target_model_name = next((m for m in available_models if 'flash' in m.lower()), None)
+        
+        # 2순위: 만약 flash가 없다면, 'pro'라는 글자가 "없는" 가벼운 모델 아무거나 선택 (429 에러 방지)
+        if not target_model_name:
+            target_model_name = next((m for m in available_models if 'pro' not in m.lower()), available_models[0])
+            
+        model = genai.GenerativeModel(target_model_name)
+    except Exception as e:
+        st.error(f"⚠️ 모델 탐색 에러: {e}")
 
 # --- 4. 뉴스 수집 엔진 (Chunking 기술 적용) ---
 @st.cache_data(ttl=1800)
